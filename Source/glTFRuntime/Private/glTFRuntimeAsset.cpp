@@ -236,6 +236,16 @@ UStaticMesh* UglTFRuntimeAsset::LoadStaticMesh(const int32 MeshIndex, const FglT
 	return Parser->LoadStaticMesh(MeshIndex, StaticMeshConfig);
 }
 
+TArray<UStaticMesh*> UglTFRuntimeAsset::LoadStaticMeshes(const FglTFRuntimeStaticMeshConfig& StaticMeshConfig)
+{
+	GLTF_CHECK_PARSER(TArray<UStaticMesh*>());
+
+	TArray<UStaticMesh*> StaticMeshes;
+	Parser->LoadStaticMeshes(StaticMeshes, StaticMeshConfig);
+
+	return StaticMeshes;
+}
+
 TArray<UStaticMesh*> UglTFRuntimeAsset::LoadStaticMeshesFromPrimitives(const int32 MeshIndex, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig)
 {
 	GLTF_CHECK_PARSER(TArray<UStaticMesh*>());
