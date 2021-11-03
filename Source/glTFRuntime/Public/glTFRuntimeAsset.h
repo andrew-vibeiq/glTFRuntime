@@ -39,7 +39,12 @@ public:
 	
 	UFUNCTION(BlueprintCallable, meta = (AdvancedDisplay = "StaticMeshConfig", AutoCreateRefTerm = "StaticMeshConfig"), Category = "glTFRuntime")
 	TArray<UStaticMesh*> LoadStaticMeshes(const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
-
+	
+	UFUNCTION(BlueprintCallable, meta = (AdvancedDisplay = "StaticMeshConfig", AutoCreateRefTerm = "StaticMeshConfig"), Category = "glTFRuntime")
+	//NOTE(achester): Added this function
+	UStaticMesh* LoadStaticMeshesAsOne(const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
+	//NOTE(achester): end
+	
 	UFUNCTION(BlueprintCallable, meta = (AdvancedDisplay = "StaticMeshConfig", AutoCreateRefTerm = "StaticMeshConfig"), Category = "glTFRuntime")
 	UStaticMesh* LoadStaticMeshLODs(const TArray<int32> MeshIndices, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
 
