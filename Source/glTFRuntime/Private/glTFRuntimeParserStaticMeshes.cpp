@@ -361,6 +361,40 @@ UStaticMesh* FglTFRuntimeParser::LoadStaticMesh_Internal(TSharedRef<FglTFRuntime
 	return StaticMesh;
 	}
 
+//NOTE(achester): Added async call to LoadStaticMeshAsOne
+void FglTFRuntimeParser::LoadStaticMeshAsOneAsync(FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig)
+{
+	TSharedRef<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe> StaticMeshContext = MakeShared<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe>(AsShared(), StaticMeshConfig);
+
+	Async(EAsyncExecution::Thread, [this, StaticMeshContext, AsyncCallback]()
+	{
+		const TArray<TSharedPtr<FJsonValue>>* JsonMeshes;
+		Root->TryGetArrayField("meshes", JsonMeshes);
+	
+		//Get all JsonMeshObjects in one array
+		TArray<TSharedRef<FJsonObject>> JsonMeshObjects;
+		for (TSharedPtr<FJsonValue> JsonValue : *JsonMeshes)
+		{
+			TSharedPtr<FJsonObject> JsonMeshObject = JsonValue->AsObject();
+			JsonMeshObjects.Add(JsonMeshObject.ToSharedRef());
+		}
+		
+		TMap<TSharedRef<FJsonObject>, TArray<FglTFRuntimePrimitive>> PrimitivesCache;
+		StaticMeshContext->StaticMesh = LoadStaticMeshAsOne_Internal(StaticMeshContext, JsonMeshObjects, PrimitivesCache);
+
+		FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady([StaticMeshContext, AsyncCallback]()
+		{
+			if (StaticMeshContext->StaticMesh)
+			{
+				StaticMeshContext->StaticMesh = StaticMeshContext->Parser->FinalizeStaticMesh(StaticMeshContext);
+			}
+
+			AsyncCallback.ExecuteIfBound(StaticMeshContext->StaticMesh);
+		}, TStatId(), nullptr, ENamedThreads::GameThread);
+		FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task);
+	});
+}
+
 //NOTE(achester): Added this function to load all meshes as mesh sections of a single static mesh
 UStaticMesh* FglTFRuntimeParser::LoadStaticMeshAsOne_Internal(TSharedRef<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe> StaticMeshContext, TArray<TSharedRef<FJsonObject>> JsonMeshObjects, const TMap<TSharedRef<FJsonObject>, TArray<FglTFRuntimePrimitive>>& PrimitivesCache)
 {

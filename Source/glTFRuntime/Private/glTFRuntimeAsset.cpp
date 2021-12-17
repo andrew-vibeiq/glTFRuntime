@@ -532,6 +532,15 @@ void UglTFRuntimeAsset::LoadStaticMeshAsync(const int32 MeshIndex, FglTFRuntimeS
 	Parser->LoadStaticMeshAsync(MeshIndex, AsyncCallback, StaticMeshConfig);
 }
 
+//NOTE(achester): Added this function
+void UglTFRuntimeAsset::LoadStaticMeshesAsOneAsync(FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig)
+{
+	GLTF_CHECK_PARSER_VOID();
+
+	Parser->LoadStaticMeshAsOneAsync(AsyncCallback, StaticMeshConfig);
+}
+//NOTE(achester): end
+
 void UglTFRuntimeAsset::LoadStaticMeshLODsAsync(const TArray<int32> MeshIndices, FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig)
 {
 	GLTF_CHECK_PARSER_VOID();
