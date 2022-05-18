@@ -639,6 +639,9 @@ UStaticMesh* FglTFRuntimeParser::LoadStaticMeshAsOne_Internal(TSharedRef<FglTFRu
 			StaticMeshVertex.Position -= PivotDelta;
 		}
 
+		//EDIT(achester): added this - bounding box should shift with verts to maintain alignment
+		BoundingBox = BoundingBox.ShiftBy(-PivotDelta);
+
 		StaticMeshContext->LOD0PivotDelta = PivotDelta;
 	}
 
