@@ -251,7 +251,7 @@ UStaticMesh* UglTFRuntimeAsset::LoadStaticMeshesAsOne(const FglTFRuntimeStaticMe
 {
 	GLTF_CHECK_PARSER(nullptr);
 
-	return Parser->LoadStaticMeshesAsOne(StaticMeshConfig);
+	return Parser->LoadStaticMeshesAsOne(StaticMeshConfig, GetNodes());
 }
 //NOTE(achester): end
 
@@ -537,7 +537,7 @@ void UglTFRuntimeAsset::LoadStaticMeshesAsOneAsync(FglTFRuntimeStaticMeshAsync A
 {
 	GLTF_CHECK_PARSER_VOID();
 
-	Parser->LoadStaticMeshAsOneAsync(AsyncCallback, StaticMeshConfig);
+	Parser->LoadStaticMeshAsOneAsync(AsyncCallback, StaticMeshConfig, GetNodes());
 }
 //NOTE(achester): end
 

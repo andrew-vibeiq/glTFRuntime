@@ -990,7 +990,7 @@ public:
 	bool LoadStaticMeshes(TArray<UStaticMesh*>& StaticMeshes, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
 	
 	//NOTE(achester): Added this function
-	UStaticMesh* LoadStaticMeshesAsOne(const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
+	UStaticMesh* LoadStaticMeshesAsOne(const FglTFRuntimeStaticMeshConfig& StaticMeshConfig, TArray<FglTFRuntimeNode> Nodes);
 	//NOTE(achester): end
 
 	TArray<UStaticMesh*> LoadStaticMeshesFromPrimitives(const int32 MeshIndex, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
@@ -1020,7 +1020,7 @@ public:
 	void LoadStaticMeshAsync(const int32 MeshIndex, FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
 	
 	//NOTE(achester): Added this function
-	void LoadStaticMeshAsOneAsync(FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
+	void LoadStaticMeshAsOneAsync(FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig, const TArray<FglTFRuntimeNode>& Nodes);
 	//NOTE(achester): end
 
 	void LoadStaticMeshLODsAsync(const TArray<int32> MeshIndices, FglTFRuntimeStaticMeshAsync AsyncCallback, const FglTFRuntimeStaticMeshConfig& StaticMeshConfig);
@@ -1107,7 +1107,7 @@ protected:
 	UStaticMesh* LoadStaticMesh_Internal(TSharedRef<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe> StaticMeshContext, TArray<TSharedRef<FJsonObject>> JsonMeshObjects, const TMap<TSharedRef<FJsonObject>, TArray<FglTFRuntimePrimitive>>& PrimitivesCache);
 
 	//NOTE(achester): Added this function
-	UStaticMesh* LoadStaticMeshAsOne_Internal(TSharedRef<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe> StaticMeshContext, TArray<TSharedRef<FJsonObject>> JsonMeshObjects, const TMap<TSharedRef<FJsonObject>, TArray<FglTFRuntimePrimitive>>& PrimitivesCache);
+	UStaticMesh* LoadStaticMeshAsOne_Internal(TSharedRef<FglTFRuntimeStaticMeshContext, ESPMode::ThreadSafe> StaticMeshContext, TArray<TSharedRef<FJsonObject>> JsonMeshObjects, const TMap<TSharedRef<FJsonObject>, TArray<FglTFRuntimePrimitive>>& PrimitivesCache, const TArray<FglTFRuntimeNode>& Nodes);
 	//NOTE(achester): end
 
 	UMaterialInterface* LoadMaterial_Internal(const int32 Index, const FString& MaterialName, TSharedRef<FJsonObject> JsonMaterialObject, const FglTFRuntimeMaterialsConfig& MaterialsConfig, const bool bUseVertexColors);
