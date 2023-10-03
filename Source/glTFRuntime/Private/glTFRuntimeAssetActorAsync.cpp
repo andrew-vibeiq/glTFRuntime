@@ -1,8 +1,9 @@
-// Copyright 2021, Roberto De Ioris.
+// Copyright 2021-2023, Roberto De Ioris.
 
 
 #include "glTFRuntimeAssetActorAsync.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMeshSocket.h"
 
 // Sets default values
@@ -13,6 +14,9 @@ AglTFRuntimeAssetActorAsync::AglTFRuntimeAssetActorAsync()
 
 	AssetRoot = CreateDefaultSubobject<USceneComponent>(TEXT("AssetRoot"));
 	RootComponent = AssetRoot;
+
+	bShowWhileLoading = true;
+	bStaticMeshesAsSkeletal = false;
 }
 
 // Called when the game starts or when spawned
@@ -24,6 +28,8 @@ void AglTFRuntimeAssetActorAsync::BeginPlay()
 	{
 		return;
 	}
+
+	LoadingStartTime = FPlatformTime::Seconds();
 
 	TArray<FglTFRuntimeScene> Scenes = Asset->GetScenes();
 	for (FglTFRuntimeScene& Scene : Scenes)
@@ -39,18 +45,27 @@ void AglTFRuntimeAssetActorAsync::BeginPlay()
 			{
 				return;
 			}
-			ProcessNode(SceneComponent, Node);
+			ProcessNode(SceneComponent, NAME_None, Node);
 		}
 	}
 
 	LoadNextMeshAsync();
 }
 
-void AglTFRuntimeAssetActorAsync::ProcessNode(USceneComponent* NodeParentComponent, FglTFRuntimeNode& Node)
+void AglTFRuntimeAssetActorAsync::ProcessNode(USceneComponent* NodeParentComponent, const FName SocketName, FglTFRuntimeNode& Node)
 {
 	// skip bones/joints
 	if (Asset->NodeIsBone(Node.Index))
 	{
+		for (int32 ChildIndex : Node.ChildrenIndices)
+		{
+			FglTFRuntimeNode Child;
+			if (!Asset->GetNode(ChildIndex, Child))
+			{
+				return;
+			}
+			ProcessNode(NodeParentComponent, *Child.Name, Child);
+		}
 		return;
 	}
 
@@ -65,7 +80,7 @@ void AglTFRuntimeAssetActorAsync::ProcessNode(USceneComponent* NodeParentCompone
 	}
 	else
 	{
-		if (Node.SkinIndex < 0)
+		if (Node.SkinIndex < 0 && !bStaticMeshesAsSkeletal)
 		{
 			UStaticMeshComponent* StaticMeshComponent = NewObject<UStaticMeshComponent>(this, GetSafeNodeName<UStaticMeshComponent>(Node));
 			StaticMeshComponent->SetupAttachment(NodeParentComponent);
@@ -91,6 +106,16 @@ void AglTFRuntimeAssetActorAsync::ProcessNode(USceneComponent* NodeParentCompone
 	{
 		return;
 	}
+	else
+	{
+		NewComponent->ComponentTags.Add(*FString::Printf(TEXT("GLTFRuntime:NodeName:%s"), *Node.Name));
+		NewComponent->ComponentTags.Add(*FString::Printf(TEXT("GLTFRuntime:NodeIndex:%d"), Node.Index));
+
+		if (SocketName != NAME_None)
+		{
+			SocketMapping.Add(NewComponent, SocketName);
+		}
+	}
 
 	for (int32 ChildIndex : Node.ChildrenIndices)
 	{
@@ -99,7 +124,7 @@ void AglTFRuntimeAssetActorAsync::ProcessNode(USceneComponent* NodeParentCompone
 		{
 			return;
 		}
-		ProcessNode(NewComponent, Child);
+		ProcessNode(NewComponent, NAME_None, Child);
 	}
 }
 
@@ -114,6 +139,10 @@ void AglTFRuntimeAssetActorAsync::LoadNextMeshAsync()
 	if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(It->Key))
 	{
 		CurrentPrimitiveComponent = StaticMeshComponent;
+		if (StaticMeshConfig.Outer == nullptr)
+		{
+			StaticMeshConfig.Outer = StaticMeshComponent;
+		}
 		FglTFRuntimeStaticMeshAsync Delegate;
 		Delegate.BindDynamic(this, &AglTFRuntimeAssetActorAsync::LoadStaticMeshAsync);
 		Asset->LoadStaticMeshAsync(It->Value.MeshIndex, Delegate, StaticMeshConfig);
@@ -131,7 +160,25 @@ void AglTFRuntimeAssetActorAsync::LoadStaticMeshAsync(UStaticMesh* StaticMesh)
 {
 	if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(CurrentPrimitiveComponent))
 	{
-		StaticMeshComponent->SetStaticMesh(StaticMesh);
+		DiscoveredStaticMeshComponents.Add(StaticMeshComponent, StaticMesh);
+		if (bShowWhileLoading)
+		{
+			StaticMeshComponent->SetStaticMesh(StaticMesh);
+		}
+
+		if (StaticMesh && !StaticMeshConfig.ExportOriginalPivotToSocket.IsEmpty())
+		{
+			UStaticMeshSocket* DeltaSocket = StaticMesh->FindSocket(FName(StaticMeshConfig.ExportOriginalPivotToSocket));
+			if (DeltaSocket)
+			{
+				FTransform NewTransform = StaticMeshComponent->GetRelativeTransform();
+				FVector DeltaLocation = -DeltaSocket->RelativeLocation * NewTransform.GetScale3D();
+				DeltaLocation = NewTransform.GetRotation().RotateVector(DeltaLocation);
+				NewTransform.AddToTranslation(DeltaLocation);
+				StaticMeshComponent->SetRelativeTransform(NewTransform);
+			}
+		}
+
 	}
 
 	MeshesToLoad.Remove(CurrentPrimitiveComponent);
@@ -142,7 +189,7 @@ void AglTFRuntimeAssetActorAsync::LoadStaticMeshAsync(UStaticMesh* StaticMesh)
 	// trigger event
 	else
 	{
-		ReceiveOnScenesLoaded();
+		ScenesLoaded();
 	}
 }
 
@@ -150,7 +197,11 @@ void AglTFRuntimeAssetActorAsync::LoadSkeletalMeshAsync(USkeletalMesh* SkeletalM
 {
 	if (USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(CurrentPrimitiveComponent))
 	{
-		SkeletalMeshComponent->SetSkeletalMesh(SkeletalMesh);
+		DiscoveredSkeletalMeshComponents.Add(SkeletalMeshComponent, SkeletalMesh);
+		if (bShowWhileLoading)
+		{
+			SkeletalMeshComponent->SetSkeletalMesh(SkeletalMesh);
+		}
 	}
 
 	MeshesToLoad.Remove(CurrentPrimitiveComponent);
@@ -161,11 +212,53 @@ void AglTFRuntimeAssetActorAsync::LoadSkeletalMeshAsync(USkeletalMesh* SkeletalM
 	// trigger event
 	else
 	{
-		ReceiveOnScenesLoaded();
+		ScenesLoaded();
 	}
+}
+
+void AglTFRuntimeAssetActorAsync::ScenesLoaded()
+{
+	if (!bShowWhileLoading)
+	{
+		for (const TPair<UStaticMeshComponent*, UStaticMesh*>& Pair : DiscoveredStaticMeshComponents)
+		{
+			Pair.Key->SetStaticMesh(Pair.Value);
+		}
+
+		for (const TPair<USkeletalMeshComponent*, USkeletalMesh*>& Pair : DiscoveredSkeletalMeshComponents)
+		{
+			Pair.Key->SetSkeletalMesh(Pair.Value);
+		}
+	}
+
+	for (TPair<USceneComponent*, FName>& Pair : SocketMapping)
+	{
+		for (const TPair<USkeletalMeshComponent*, USkeletalMesh*>& MeshPair : DiscoveredSkeletalMeshComponents)
+		{
+			if (MeshPair.Key->DoesSocketExist(Pair.Value))
+			{
+				Pair.Key->AttachToComponent(MeshPair.Key, FAttachmentTransformRules::KeepRelativeTransform, Pair.Value);
+				Pair.Key->SetRelativeTransform(FTransform::Identity);
+				break;
+			}
+		}
+	}
+
+	UE_LOG(LogGLTFRuntime, Log, TEXT("Asset loaded asynchronously in %f seconds"), FPlatformTime::Seconds() - LoadingStartTime);
+	ReceiveOnScenesLoaded();
 }
 
 void AglTFRuntimeAssetActorAsync::ReceiveOnScenesLoaded_Implementation()
 {
 
+}
+
+void AglTFRuntimeAssetActorAsync::PostUnregisterAllComponents()
+{
+	if (Asset)
+	{
+		Asset->ClearCache();
+		Asset = nullptr;
+	}
+	Super::PostUnregisterAllComponents();
 }
