@@ -90,6 +90,8 @@ TSharedPtr<FglTFRuntimeParser> FglTFRuntimeParser::FromFilename(const FString& F
 		Parser->BaseDirectory = FPaths::GetPath(TruePath);
 	}
 
+	Parser->BaseFilename = FPaths::GetBaseFilename(TruePath);
+
 	return Parser;
 }
 
@@ -1014,12 +1016,49 @@ bool FglTFRuntimeParser::GetAllNodes(TArray<FglTFRuntimeNode>& Nodes)
 	if (!bAllNodesCached)
 	{
 		if (!LoadNodes())
+		{
 			return false;
+		}
 	}
 
 	Nodes = AllNodesCache;
 
 	return true;
+}
+
+int32 FglTFRuntimeParser::AddFakeRootNode(const FString& BaseName)
+{
+	TArray<int32> OrphanNodes;
+	TArray<FglTFRuntimeNode> AllNodes;
+
+	if (!GetAllNodes(AllNodes))
+	{
+		return INDEX_NONE;
+	}
+
+	for (int32 NodeIndex = 0; NodeIndex < AllNodes.Num(); NodeIndex++)
+	{
+		FglTFRuntimeNode Node;
+		if (!LoadNode(NodeIndex, Node))
+		{
+			return INDEX_NONE;
+		}
+
+		if (Node.ParentIndex <= INDEX_NONE)
+		{
+			OrphanNodes.Add(NodeIndex);
+			AllNodesCache[NodeIndex].ParentIndex = AllNodes.Num();
+		}
+	}
+
+	FglTFRuntimeNode NewNode;
+	NewNode.Name = BaseName;
+	NewNode.Index = AllNodes.Num();
+	NewNode.ChildrenIndices = OrphanNodes;
+
+	AllNodesCache.Add(NewNode);
+
+	return NewNode.Index;
 }
 
 bool FglTFRuntimeParser::LoadNode(const int32 Index, FglTFRuntimeNode& Node)
@@ -1109,6 +1148,16 @@ void FglTFRuntimeParser::AddError(const FString& ErrorContext, const FString& Er
 	{
 		OnError.Broadcast(ErrorContext, ErrorMessage);
 	}
+}
+
+bool FglTFRuntimeParser::HasErrors() const
+{
+	return Errors.Num() > 0;
+}
+
+const TArray<FString>& FglTFRuntimeParser::GetErrors() const
+{
+	return Errors;
 }
 
 void FglTFRuntimeParser::ClearErrors()
@@ -1217,6 +1266,13 @@ bool FglTFRuntimeParser::LoadNode_Internal(int32 Index, TSharedRef<FJsonObject> 
 	}
 
 	return true;
+}
+
+FTransform FglTFRuntimeParser::RawMatrixToRebasedTransform(const FMatrix& Matrix) const
+{
+	FMatrix MatrixCopy = Matrix;
+	MatrixCopy.ScaleTranslation(FVector(SceneScale, SceneScale, SceneScale));
+	return FTransform(SceneBasis.Inverse() * MatrixCopy * SceneBasis);
 }
 
 bool FglTFRuntimeParser::LoadAnimation_Internal(TSharedRef<FJsonObject> JsonAnimationObject, float& Duration, FString& Name, TFunctionRef<void(const FglTFRuntimeNode& Node, const FString& Path, const FglTFRuntimeAnimationCurve& Curve)> Callback, TFunctionRef<bool(const FglTFRuntimeNode& Node)> NodeFilter, const TArray<FglTFRuntimePathItem>& OverrideTrackNameFromExtension)
@@ -1586,18 +1642,27 @@ TArray<UglTFRuntimeAnimationCurve*> FglTFRuntimeParser::LoadAllNodeAnimationCurv
 bool FglTFRuntimeParser::HasRoot(int32 Index, int32 RootIndex)
 {
 	if (Index == RootIndex)
+	{
 		return true;
+	}
 
 	FglTFRuntimeNode Node;
 	if (!LoadNode(Index, Node))
+	{
 		return false;
+	}
 
 	while (Node.ParentIndex != INDEX_NONE)
 	{
 		if (!LoadNode(Node.ParentIndex, Node))
+		{
 			return false;
+		}
+
 		if (Node.Index == RootIndex)
+		{
 			return true;
+		}
 	}
 
 	return false;
@@ -1622,11 +1687,13 @@ int32 FglTFRuntimeParser::FindCommonRoot(const TArray<int32>& Indices)
 	int32 CurrentRootIndex = Indices[0];
 	bool bTryNextParent = true;
 
-	while (bTryNextParent)
+	while (bTryNextParent && CurrentRootIndex > INDEX_NONE)
 	{
 		FglTFRuntimeNode Node;
 		if (!LoadNode(CurrentRootIndex, Node))
+		{
 			return INDEX_NONE;
+		}
 
 		bTryNextParent = false;
 		for (int32 Index : Indices)
@@ -2057,9 +2124,13 @@ bool FglTFRuntimeParser::GetRootBoneIndex(TSharedRef<FJsonObject> JsonSkinObject
 	else
 	{
 		RootBoneIndex = FindCommonRoot(Joints);
+		if (RootBoneIndex < 0 && SkeletonConfig.bAddRootNodeIfMissing)
+		{
+			RootBoneIndex = AddFakeRootNode(SkeletonConfig.RootBoneName.IsEmpty() ? "root" : SkeletonConfig.RootBoneName);
+		}
 	}
 
-	if (RootBoneIndex == INDEX_NONE)
+	if (RootBoneIndex <= INDEX_NONE)
 	{
 		AddError("GetRootBoneIndex()", "Unable to find root node.");
 		return false;
@@ -2080,7 +2151,6 @@ bool FglTFRuntimeParser::FillReferenceSkeleton(TSharedRef<FJsonObject> JsonSkinO
 
 	// fill the root bone
 	FglTFRuntimeNode RootNode;
-
 	if (!LoadNode(RootBoneIndex, RootNode))
 	{
 		AddError("FillReferenceSkeleton()", "Unable to load joint node.");
@@ -2435,7 +2505,7 @@ bool FglTFRuntimeParser::TraverseJoints(FReferenceSkeletonModifier& Modifier, co
 	return true;
 }
 
-bool FglTFRuntimeParser::LoadPrimitives(TSharedRef<FJsonObject> JsonMeshObject, TArray<FglTFRuntimePrimitive>& Primitives, const FglTFRuntimeMaterialsConfig& MaterialsConfig)
+bool FglTFRuntimeParser::LoadPrimitives(TSharedRef<FJsonObject> JsonMeshObject, TArray<FglTFRuntimePrimitive>& Primitives, const FglTFRuntimeMaterialsConfig& MaterialsConfig, const bool bTriangulatePointsAndLines)
 {
 	// get primitives
 	const TArray<TSharedPtr<FJsonValue>>* JsonPrimitives;
@@ -2456,7 +2526,7 @@ bool FglTFRuntimeParser::LoadPrimitives(TSharedRef<FJsonObject> JsonMeshObject, 
 		}
 
 		FglTFRuntimePrimitive Primitive;
-		if (!LoadPrimitive(JsonPrimitiveObject.ToSharedRef(), Primitive, MaterialsConfig))
+		if (!LoadPrimitive(JsonPrimitiveObject.ToSharedRef(), Primitive, MaterialsConfig, bTriangulatePointsAndLines))
 		{
 			return false;
 		}
@@ -2501,70 +2571,94 @@ bool FglTFRuntimeParser::LoadPrimitives(TSharedRef<FJsonObject> JsonMeshObject, 
 
 	if (MaterialsConfig.bMergeSectionsByMaterial)
 	{
-		TMap<UMaterialInterface*, TArray<FglTFRuntimePrimitive>> PrimitivesMap;
-		for (FglTFRuntimePrimitive& Primitive : Primitives)
-		{
-			if (PrimitivesMap.Contains(Primitive.Material))
-			{
-				PrimitivesMap[Primitive.Material].Add(Primitive);
-			}
-			else
-			{
-				TArray<FglTFRuntimePrimitive> NewPrimitives;
-				NewPrimitives.Add(Primitive);
-				PrimitivesMap.Add(Primitive.Material, NewPrimitives);
-			}
-		}
-
-		TArray<FglTFRuntimePrimitive> MergedPrimitives;
-		for (TPair<UMaterialInterface*, TArray<FglTFRuntimePrimitive>>& Pair : PrimitivesMap)
-		{
-			FglTFRuntimePrimitive MergedPrimitive;
-			if (MergePrimitives(Pair.Value, MergedPrimitive))
-			{
-				MergedPrimitives.Add(MergedPrimitive);
-			}
-			else
-			{
-				// unable to merge, just leave as is
-				for (FglTFRuntimePrimitive& Primitive : Pair.Value)
-				{
-					MergedPrimitives.Add(Primitive);
-				}
-			}
-		}
-
-		Primitives = MergedPrimitives;
-
+		MergePrimitivesByMaterial(Primitives);
 	}
 
 	return true;
 }
 
-FVector FglTFRuntimeParser::TransformVector(FVector Vector) const
+void FglTFRuntimeParser::MergePrimitivesByMaterial(TArray<FglTFRuntimePrimitive>& Primitives)
+{
+	TMap<UMaterialInterface*, TArray<FglTFRuntimePrimitive>> PrimitivesMap;
+	for (FglTFRuntimePrimitive& Primitive : Primitives)
+	{
+		if (PrimitivesMap.Contains(Primitive.Material))
+		{
+			PrimitivesMap[Primitive.Material].Add(Primitive);
+		}
+		else
+		{
+			TArray<FglTFRuntimePrimitive> NewPrimitives;
+			NewPrimitives.Add(Primitive);
+			PrimitivesMap.Add(Primitive.Material, NewPrimitives);
+		}
+	}
+
+	TArray<FglTFRuntimePrimitive> MergedPrimitives;
+	for (TPair<UMaterialInterface*, TArray<FglTFRuntimePrimitive>>& Pair : PrimitivesMap)
+	{
+		FglTFRuntimePrimitive MergedPrimitive;
+		if (MergePrimitives(Pair.Value, MergedPrimitive))
+		{
+			MergedPrimitives.Add(MergedPrimitive);
+		}
+		else
+		{
+			// unable to merge, just leave as is
+			for (FglTFRuntimePrimitive& Primitive : Pair.Value)
+			{
+				MergedPrimitives.Add(Primitive);
+			}
+		}
+	}
+
+	Primitives = MergedPrimitives;
+}
+
+FVector FglTFRuntimeParser::TransformVector(const FVector Vector) const
 {
 	return SceneBasis.TransformVector(Vector);
 }
 
-FVector FglTFRuntimeParser::TransformPosition(FVector Position) const
+FVector FglTFRuntimeParser::TransformPosition(const FVector Position) const
 {
 	return SceneBasis.TransformPosition(Position) * SceneScale;
 }
 
-FVector4 FglTFRuntimeParser::TransformVector4(FVector4 Vector) const
+FVector4 FglTFRuntimeParser::TransformVector4(const FVector4 Vector) const
 {
 	return SceneBasis.TransformFVector4(Vector);
 }
 
-bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObject, FglTFRuntimePrimitive& Primitive, const FglTFRuntimeMaterialsConfig& MaterialsConfig)
+FTransform FglTFRuntimeParser::TransformTransform(const FTransform& Transform) const
+{
+	FTransform NewTransform = FTransform(SceneBasis.Inverse() * Transform.ToMatrixWithScale() * SceneBasis);
+	NewTransform.ScaleTranslation(SceneScale);
+
+	return NewTransform;
+}
+
+bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObject, FglTFRuntimePrimitive& Primitive, const FglTFRuntimeMaterialsConfig& MaterialsConfig, const bool bTriangulatePointsAndLines)
 {
 	SCOPED_NAMED_EVENT(FglTFRuntimeParser_LoadPrimitive, FColor::Magenta);
+
+	UMaterialInterface* ForceBaseMaterial = nullptr;
 
 	OnPreLoadedPrimitive.Broadcast(AsShared(), JsonPrimitiveObject, Primitive);
 
 	if (!JsonPrimitiveObject->TryGetNumberField("mode", Primitive.Mode))
 	{
 		Primitive.Mode = 4; // triangles
+	}
+
+	if (Primitive.Mode == 0 && MaterialsConfig.bSkipPoints)
+	{
+		return false;
+	}
+
+	if (Primitive.Mode >= 1 && Primitive.Mode <= 3 && MaterialsConfig.bSkipLines)
+	{
+		return false;
 	}
 
 	const TSharedPtr<FJsonObject>* JsonAttributesObject;
@@ -2924,6 +3018,10 @@ bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObje
 		}
 		Primitive.Indices = FanIndices;
 	}
+	else if (bTriangulatePointsAndLines)
+	{
+		ForceBaseMaterial = TriangulatePointsAndLines(Primitive, MaterialsConfig);
+	}
 
 	Primitive.Material = UMaterial::GetDefaultMaterial(MD_Surface);
 
@@ -2968,7 +3066,7 @@ bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObje
 
 		if (MaterialIndex != INDEX_NONE)
 		{
-			Primitive.Material = LoadMaterial(MaterialIndex, MaterialsConfig, Primitive.Colors.Num() > 0, Primitive.MaterialName);
+			Primitive.Material = LoadMaterial(MaterialIndex, MaterialsConfig, Primitive.Colors.Num() > 0, Primitive.MaterialName, ForceBaseMaterial);
 			if (!Primitive.Material)
 			{
 				AddError("LoadPrimitive()", FString::Printf(TEXT("Unable to load material %lld"), MaterialIndex));
@@ -2979,7 +3077,7 @@ bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObje
 		// special case for primitives without a material but with a color buffer
 		else if (Primitive.Colors.Num() > 0)
 		{
-			Primitive.Material = BuildVertexColorOnlyMaterial(MaterialsConfig);
+			Primitive.Material = BuildVertexColorOnlyMaterial(MaterialsConfig, false);
 		}
 	}
 
@@ -2988,6 +3086,906 @@ bool FglTFRuntimeParser::LoadPrimitive(TSharedRef<FJsonObject> JsonPrimitiveObje
 	return true;
 }
 
+UMaterialInterface* FglTFRuntimeParser::TriangulatePoints(FglTFRuntimePrimitive& Primitive, const FglTFRuntimeMaterialsConfig& MaterialsConfig)
+{
+	TArray<uint32> PointsIndices;
+	TArray<FVector> PointsPositions;
+	TArray<FVector> PointsNormals;
+	TArray<FVector2D> PointsUV;
+	TArray<FVector2D> PointsUVXY;
+	TArray<FVector2D> PointsUVZW;
+	TArray<FVector4> PointsColors;
+
+	const bool bHasColors = Primitive.Colors.Num() > 0;
+	const bool bHasNormals = Primitive.Normals.Num() > 0;
+	const bool bHasUVs = Primitive.UVs.Num() > 0;
+
+	const float Scale = MaterialsConfig.PointsScaleFactor;
+
+	const int32 NumIndices = Primitive.Indices.Num();
+
+	bool bUVXY = false;
+	bool bUVZW = false;
+	bool bOpened = false;
+
+	auto ToTriangle = [&](const int32 Index)
+		{
+			if (!Primitive.Indices.IsValidIndex(Index))
+			{
+				return;
+			}
+
+			const uint32 PointIndex = Primitive.Indices[Index];
+
+			if (!Primitive.Positions.IsValidIndex(PointIndex))
+			{
+				return;
+			}
+
+			const FVector& Point = Primitive.Positions[PointIndex];
+
+			PointsIndices[Index * 3] = Index * 3;
+			PointsIndices[Index * 3 + 1] = Index * 3 + 1;
+			PointsIndices[Index * 3 + 2] = Index * 3 + 2;
+
+			PointsPositions[Index * 3] = Point + FVector(0, 0, 0.5) * Scale;
+			PointsPositions[Index * 3 + 1] = Point + FVector(0, -0.5, -0.5) * Scale;
+			PointsPositions[Index * 3 + 2] = Point + FVector(0, 0.5, -0.5) * Scale;
+
+			if (bHasNormals)
+			{
+				if (Primitive.Normals.IsValidIndex(PointIndex))
+				{
+					PointsNormals[Index * 3] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 3 + 1] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 3 + 2] = Primitive.Normals[PointIndex];
+				}
+				else
+				{
+					PointsNormals[Index * 3] = FVector(0, 0, -1);
+					PointsNormals[Index * 3 + 1] = FVector(0, 0, -1);
+					PointsNormals[Index * 3 + 2] = FVector(0, 0, -1);
+				}
+			}
+
+			if (bHasUVs)
+			{
+				if (Primitive.UVs[0].IsValidIndex(PointIndex))
+				{
+					PointsUV[Index * 3] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 3 + 1] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 3 + 2] = Primitive.UVs[0][PointIndex];
+				}
+				else
+				{
+					PointsUV[Index * 3] = FVector2D(0, 0);
+					PointsUV[Index * 3 + 1] = FVector2D(0, 0);
+					PointsUV[Index * 3 + 2] = FVector2D(0, 0);
+				}
+			}
+
+			if (bUVXY)
+			{
+				PointsUVXY[Index * 3] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 3 + 1] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 3 + 2] = FVector2D(Point.X, Point.Y);
+			}
+
+			if (bUVZW)
+			{
+				PointsUVZW[Index * 3] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 3 + 1] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 3 + 2] = FVector2D(Point.Z, 0);
+			}
+
+			if (bHasColors)
+			{
+				if (Primitive.Colors.IsValidIndex(PointIndex))
+				{
+					const FVector4 Color = Primitive.Colors[PointIndex];
+					PointsColors[Index * 3] = Color;
+					PointsColors[Index * 3 + 1] = Color;
+					PointsColors[Index * 3 + 2] = Color;
+				}
+				else
+				{
+					PointsColors[Index * 3] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 3 + 1] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 3 + 2] = FVector4(1, 1, 1, 1);
+				}
+			}
+		};
+
+	auto ToQuad = [&](const int32 Index)
+		{
+			if (!Primitive.Indices.IsValidIndex(Index))
+			{
+				return;
+			}
+
+			const uint32 PointIndex = Primitive.Indices[Index];
+
+			if (!Primitive.Positions.IsValidIndex(PointIndex))
+			{
+				return;
+			}
+
+			const FVector& Point = Primitive.Positions[PointIndex];
+
+			PointsIndices[Index * 6] = Index * 6;
+			PointsIndices[Index * 6 + 1] = Index * 6 + 1;
+			PointsIndices[Index * 6 + 2] = Index * 6 + 2;
+			PointsIndices[Index * 6 + 3] = Index * 6 + 3;
+			PointsIndices[Index * 6 + 4] = Index * 6 + 4;
+			PointsIndices[Index * 6 + 5] = Index * 6 + 5;
+
+			// top triangle
+			PointsPositions[Index * 6] = Point + FVector(0, -0.5, 0.5) * Scale;
+			PointsPositions[Index * 6 + 1] = Point + FVector(0, -0.5, -0.5) * Scale;
+			PointsPositions[Index * 6 + 2] = Point + FVector(0, 0.5, 0.5) * Scale;
+			// bottom triangle
+			PointsPositions[Index * 6 + 3] = Point + FVector(0, 0.5, 0.5) * Scale;
+			PointsPositions[Index * 6 + 4] = Point + FVector(0, -0.5, -0.5) * Scale;
+			PointsPositions[Index * 6 + 5] = Point + FVector(0, 0.5, -0.5) * Scale;
+
+			if (bHasNormals)
+			{
+				if (Primitive.Normals.IsValidIndex(PointIndex))
+				{
+					PointsNormals[Index * 6] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 6 + 1] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 6 + 2] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 6 + 3] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 6 + 4] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * 6 + 5] = Primitive.Normals[PointIndex];
+				}
+				else
+				{
+					PointsNormals[Index * 6] = FVector(0, 0, -1);
+					PointsNormals[Index * 6 + 1] = FVector(0, 0, -1);
+					PointsNormals[Index * 6 + 2] = FVector(0, 0, -1);
+					PointsNormals[Index * 6 + 3] = FVector(0, 0, -1);
+					PointsNormals[Index * 6 + 4] = FVector(0, 0, -1);
+					PointsNormals[Index * 6 + 5] = FVector(0, 0, -1);
+				}
+			}
+
+			if (bHasUVs)
+			{
+				if (Primitive.UVs[0].IsValidIndex(PointIndex))
+				{
+					PointsUV[Index * 6] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 6 + 1] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 6 + 2] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 6 + 3] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 6 + 4] = Primitive.UVs[0][PointIndex];
+					PointsUV[Index * 6 + 5] = Primitive.UVs[0][PointIndex];
+				}
+				else
+				{
+					PointsUV[Index * 6] = FVector2D(0, 0);
+					PointsUV[Index * 6 + 1] = FVector2D(0, 0);
+					PointsUV[Index * 6 + 2] = FVector2D(0, 0);
+					PointsUV[Index * 6 + 3] = FVector2D(0, 0);
+					PointsUV[Index * 6 + 4] = FVector2D(0, 0);
+					PointsUV[Index * 6 + 5] = FVector2D(0, 0);
+				}
+			}
+
+			if (bUVXY)
+			{
+				PointsUVXY[Index * 6] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 6 + 1] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 6 + 2] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 6 + 3] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 6 + 4] = FVector2D(Point.X, Point.Y);
+				PointsUVXY[Index * 6 + 5] = FVector2D(Point.X, Point.Y);
+			}
+
+			if (bUVZW)
+			{
+				PointsUVZW[Index * 6] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 6 + 1] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 6 + 2] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 6 + 3] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 6 + 4] = FVector2D(Point.Z, 0);
+				PointsUVZW[Index * 6 + 5] = FVector2D(Point.Z, 0);
+			}
+
+			if (bHasColors)
+			{
+				if (Primitive.Colors.IsValidIndex(PointIndex))
+				{
+					const FVector4 Color = Primitive.Colors[PointIndex];
+					PointsColors[Index * 6] = Color;
+					PointsColors[Index * 6 + 1] = Color;
+					PointsColors[Index * 6 + 2] = Color;
+					PointsColors[Index * 6 + 3] = Color;
+					PointsColors[Index * 6 + 4] = Color;
+					PointsColors[Index * 6 + 5] = Color;
+				}
+				else
+				{
+					PointsColors[Index * 6] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 6 + 1] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 6 + 2] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 6 + 3] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 6 + 4] = FVector4(1, 1, 1, 1);
+					PointsColors[Index * 6 + 5] = FVector4(1, 1, 1, 1);
+				}
+			}
+		};
+
+	auto ToTetrahedron = [&](const int32 Index)
+		{
+			const int32 NumVertices = bOpened ? 9 : 12;
+
+			if (!Primitive.Indices.IsValidIndex(Index))
+			{
+				return;
+			}
+
+			const uint32 PointIndex = Primitive.Indices[Index];
+
+			if (!Primitive.Positions.IsValidIndex(PointIndex))
+			{
+				return;
+			}
+
+			const FVector& Point = Primitive.Positions[PointIndex];
+
+			for (int32 Iter = 0; Iter < NumVertices; Iter++)
+			{
+				PointsIndices[Index * NumVertices + Iter] = Index * NumVertices + Iter;
+			}
+
+			// front
+			PointsPositions[Index * NumVertices] = Point + FVector(0, 0, 0.5) * Scale;
+			PointsPositions[Index * NumVertices + 1] = Point + FVector(-0.5, -0.5, -0.5) * Scale;
+			PointsPositions[Index * NumVertices + 2] = Point + FVector(-0.5, 0.5, -0.5) * Scale;
+
+			if (bHasNormals)
+			{
+				if (Primitive.Normals.IsValidIndex(PointIndex))
+				{
+					PointsNormals[Index * NumVertices] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * NumVertices + 1] = Primitive.Normals[PointIndex];
+					PointsNormals[Index * NumVertices + 2] = Primitive.Normals[PointIndex];
+				}
+				else
+				{
+					PointsNormals[Index * NumVertices] = FVector(0, 0, -1);
+					PointsNormals[Index * NumVertices + 1] = FVector(0, 0, -1);
+					PointsNormals[Index * NumVertices + 2] = FVector(0, 0, -1);
+				}
+			}
+
+			// left
+			PointsPositions[Index * NumVertices + 3] = Point + FVector(0, 0, 0.5) * Scale;
+			PointsPositions[Index * NumVertices + 4] = Point + FVector(0.5, 0, -0.5) * Scale;
+			PointsPositions[Index * NumVertices + 5] = Point + FVector(-0.5, -0.5, -0.5) * Scale;
+			if (bHasNormals)
+			{
+				if (Primitive.Normals.IsValidIndex(PointIndex))
+				{
+					const FVector LeftNormal = -FVector::CrossProduct(Primitive.Normals[PointIndex], FVector(0, 0, 1)).GetSafeNormal();
+					PointsNormals[Index * NumVertices + 3] = LeftNormal;
+					PointsNormals[Index * NumVertices + 4] = LeftNormal;
+					PointsNormals[Index * NumVertices + 5] = LeftNormal;
+				}
+				else
+				{
+					PointsNormals[Index * NumVertices + 3] = FVector(0, -1, 0);
+					PointsNormals[Index * NumVertices + 4] = FVector(0, -1, 0);
+					PointsNormals[Index * NumVertices + 5] = FVector(0, -1, 0);
+				}
+			}
+
+			// right
+			PointsPositions[Index * NumVertices + 6] = Point + FVector(0, 0, 0.5) * Scale;
+			PointsPositions[Index * NumVertices + 7] = Point + FVector(-0.5, 0.5, -0.5) * Scale;
+			PointsPositions[Index * NumVertices + 8] = Point + FVector(0.5, 0, -0.5) * Scale;
+			if (bHasNormals)
+			{
+				if (Primitive.Normals.IsValidIndex(PointIndex))
+				{
+					const FVector RightNormal = FVector::CrossProduct(Primitive.Normals[PointIndex], FVector(0, 0, 1)).GetSafeNormal();
+					PointsNormals[Index * NumVertices + 6] = RightNormal;
+					PointsNormals[Index * NumVertices + 7] = RightNormal;
+					PointsNormals[Index * NumVertices + 8] = RightNormal;
+				}
+				else
+				{
+					PointsNormals[Index * NumVertices + 6] = FVector(0, 1, 0);
+					PointsNormals[Index * NumVertices + 7] = FVector(0, 1, 0);
+					PointsNormals[Index * NumVertices + 8] = FVector(0, 1, 0);
+				}
+			}
+
+			if (!bOpened)
+			{
+				// base
+				PointsPositions[Index * NumVertices + 9] = Point + FVector(0.5, 0, -0.5) * Scale;
+				PointsPositions[Index * NumVertices + 10] = Point + FVector(-0.5, 0.5, -0.5) * Scale;
+				PointsPositions[Index * NumVertices + 11] = Point + FVector(-0.5, -0.5, -0.5) * Scale;
+				if (bHasNormals)
+				{
+					PointsNormals[Index * NumVertices + 9] = FVector(0, 0, -1);
+					PointsNormals[Index * NumVertices + 10] = FVector(0, 0, -1);
+					PointsNormals[Index * NumVertices + 11] = FVector(0, 0, -1);
+				}
+			}
+
+			if (bHasUVs)
+			{
+				if (Primitive.UVs[0].IsValidIndex(PointIndex))
+				{
+					for (int32 Iter = 0; Iter < NumVertices; Iter++)
+					{
+						PointsUV[Index * NumVertices + Iter] = Primitive.UVs[0][PointIndex];
+					}
+				}
+				else
+				{
+					for (int32 Iter = 0; Iter < NumVertices; Iter++)
+					{
+						PointsUV[Index * NumVertices + Iter] = FVector2D(0, 0);
+					}
+				}
+			}
+
+			if (bUVXY)
+			{
+				for (int32 Iter = 0; Iter < NumVertices; Iter++)
+				{
+					PointsUVXY[Index * NumVertices + Iter] = FVector2D(Point.X, Point.Y);
+				}
+			}
+
+			if (bUVZW)
+			{
+				for (int32 Iter = 0; Iter < NumVertices; Iter++)
+				{
+					PointsUVZW[Index * NumVertices + Iter] = FVector2D(Point.Z, 0);
+				}
+			}
+
+			if (bHasColors)
+			{
+				if (Primitive.Colors.IsValidIndex(PointIndex))
+				{
+					const FVector4 Color = Primitive.Colors[PointIndex];
+					for (int32 Iter = 0; Iter < NumVertices; Iter++)
+					{
+						PointsColors[Index * NumVertices + Iter] = Color;
+					}
+				}
+				else
+				{
+					for (int32 Iter = 0; Iter < NumVertices; Iter++)
+					{
+						PointsColors[Index * NumVertices + Iter] = FVector4(1, 1, 1, 1);
+					}
+				}
+			}
+		};
+
+
+	TFunction<void(const int32)> Triangulator = nullptr;
+
+	switch (MaterialsConfig.PointsTriangulationMode)
+	{
+	case(EglTFRuntimePointsTriangulationMode::Triangle):
+	{
+		PointsIndices.AddZeroed(NumIndices * 3);
+		PointsPositions.AddZeroed(NumIndices * 3);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 3);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 3);
+		}
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 3);
+		}
+		Triangulator = ToTriangle;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::TriangleWithXYInUV1):
+	{
+		PointsIndices.AddZeroed(NumIndices * 3);
+		PointsPositions.AddZeroed(NumIndices * 3);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 3);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 3);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 3);
+		bUVXY = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 3);
+		}
+		Triangulator = ToTriangle;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::TriangleWithXYInUV1ZWInUV2):
+	{
+		PointsIndices.AddZeroed(NumIndices * 3);
+		PointsPositions.AddZeroed(NumIndices * 3);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 3);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 3);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 3);
+		bUVXY = true;
+		PointsUVZW.AddZeroed(NumIndices * 3);
+		bUVZW = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 3);
+		}
+		Triangulator = ToTriangle;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::Quad):
+	{
+		PointsIndices.AddZeroed(NumIndices * 6);
+		PointsPositions.AddZeroed(NumIndices * 6);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 6);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 6);
+		}
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 6);
+		}
+		Triangulator = ToQuad;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::QuadWithXYInUV1):
+	{
+		PointsIndices.AddZeroed(NumIndices * 6);
+		PointsPositions.AddZeroed(NumIndices * 6);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 6);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 6);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 6);
+		bUVXY = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 6);
+		}
+		Triangulator = ToQuad;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::QuadWithXYInUV1ZWInUV2):
+	{
+		PointsIndices.AddZeroed(NumIndices * 6);
+		PointsPositions.AddZeroed(NumIndices * 6);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 6);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 6);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 6);
+		bUVXY = true;
+		PointsUVZW.AddZeroed(NumIndices * 6);
+		bUVZW = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 6);
+		}
+		Triangulator = ToQuad;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::OpenedTetrahedron):
+	{
+		PointsIndices.AddZeroed(NumIndices * 9);
+		PointsPositions.AddZeroed(NumIndices * 9);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 9);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 9);
+		}
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 9);
+		}
+		bOpened = true;
+		Triangulator = ToTetrahedron;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::OpenedTetrahedronWithXYInUV1ZWInUV2):
+	{
+		PointsIndices.AddZeroed(NumIndices * 9);
+		PointsPositions.AddZeroed(NumIndices * 9);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 9);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 9);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 9);
+		bUVXY = true;
+		PointsUVZW.AddZeroed(NumIndices * 9);
+		bUVZW = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 9);
+		}
+		bOpened = true;
+		Triangulator = ToTetrahedron;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::Tetrahedron):
+	{
+		PointsIndices.AddZeroed(NumIndices * 12);
+		PointsPositions.AddZeroed(NumIndices * 12);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 12);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 12);
+		}
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 12);
+		}
+		Triangulator = ToTetrahedron;
+	}
+	break;
+	case(EglTFRuntimePointsTriangulationMode::TetrahedronWithXYInUV1ZWInUV2):
+	{
+		PointsIndices.AddZeroed(NumIndices * 12);
+		PointsPositions.AddZeroed(NumIndices * 12);
+		if (bHasNormals)
+		{
+			PointsNormals.AddZeroed(NumIndices * 12);
+		}
+		if (bHasUVs)
+		{
+			PointsUV.AddZeroed(NumIndices * 12);
+		}
+		PointsUVXY.AddZeroed(NumIndices * 12);
+		bUVXY = true;
+		PointsUVZW.AddZeroed(NumIndices * 12);
+		bUVZW = true;
+		if (bHasColors)
+		{
+			PointsColors.AddZeroed(NumIndices * 12);
+		}
+		Triangulator = ToTetrahedron;
+	}
+	break;
+	default:
+		UE_LOG(LogGLTFRuntime, Error, TEXT("Unsupported/Unimplemented Triangulator algorithm"));
+		break;
+	}
+
+	if (Triangulator)
+	{
+		ParallelFor(NumIndices, Triangulator);
+		Primitive.Mode = 4;
+		Primitive.bDisableShadows = true;
+		Primitive.Indices = PointsIndices;
+		Primitive.Positions = PointsPositions;
+		if (bHasNormals)
+		{
+			Primitive.Normals = PointsNormals;
+		}
+		Primitive.UVs = { PointsUV };
+		if (bUVXY)
+		{
+			Primitive.UVs.Add(MoveTemp(PointsUVXY));
+		}
+		if (bUVZW)
+		{
+			Primitive.UVs.Add(MoveTemp(PointsUVZW));
+		}
+		Primitive.Tangents.Empty(); // TODO we should honour supplied tangents...
+		Primitive.bHighPrecisionUVs = true;
+		if (bHasColors)
+		{
+			Primitive.Colors = PointsColors;
+		}
+
+		return MaterialsConfig.PointsBaseMaterial;
+	}
+
+	return nullptr;
+}
+
+UMaterialInterface* FglTFRuntimeParser::TriangulateLines(FglTFRuntimePrimitive& Primitive, const FglTFRuntimeMaterialsConfig& MaterialsConfig)
+{
+	if (Primitive.Mode != 1) // only plain lines for now
+	{
+		return nullptr;
+	}
+
+	TArray<uint32> LinesIndices;
+	TArray<FVector> LinesPositions;
+	TArray<FVector4> LinesColors;
+	TArray<FVector2D> LinesUV;
+	TArray<FVector2D> PointsUVXY;
+	TArray<FVector2D> PointsUVZW;
+
+	bool bHasColors = Primitive.Colors.Num() > 0;
+	bool bHasNormals = Primitive.Normals.Num() > 0;
+	const bool bHasUVs = Primitive.UVs.Num() > 0;
+
+	bool bUVXY = false;
+	bool bUVZW = false;
+	bool bOpened = false;
+
+	const float Scale = MaterialsConfig.LinesScaleFactor;
+
+	auto ToOpenedTriangularPrism = [&](const int32 Index)
+		{
+			const uint32 Point0Index = Primitive.Indices[Index * 2];
+			const uint32 Point1Index = Primitive.Indices[Index * 2 + 1];
+
+			if (!Primitive.Positions.IsValidIndex(Point0Index) || !Primitive.Positions.IsValidIndex(Point1Index))
+			{
+				return;
+			}
+
+			const FVector& Point0 = Primitive.Positions[Point0Index];
+			const FVector& Point1 = Primitive.Positions[Point1Index];
+
+			const FVector LineForward = (Point1 - Point0).GetSafeNormal();
+			FVector LineRight = FVector::CrossProduct(LineForward, FVector(0, 0, 1));
+			if (FMath::Abs(FVector::DotProduct(LineForward, FVector(0, 0, 1))) > FMath::Abs(FVector::DotProduct(LineForward, FVector(-1, 0, 0))))
+			{
+				LineRight = FVector::CrossProduct(LineForward, FVector(-1, 0, 0));
+			}
+			const FVector LineUp = FVector::CrossProduct(LineForward, LineRight);
+			LineRight = FVector::CrossProduct(LineForward, LineUp);
+
+			FVector2D Point0UV = FVector2D(0, 0);
+			FVector2D Point1UV = FVector2D(0, 0);
+
+			if (bHasUVs)
+			{
+				if (Primitive.UVs[0].IsValidIndex(Point0Index))
+				{
+					Point0UV = Primitive.UVs[0][Point0Index];
+				}
+				if (Primitive.UVs[0].IsValidIndex(Point1Index))
+				{
+					Point1UV = Primitive.UVs[0][Point1Index];
+				}
+			}
+
+			const int32 NumVertices = bOpened ? 12 : 18;
+
+			for (int32 Iter = 0; Iter < NumVertices; Iter++)
+			{
+				LinesIndices[Index * NumVertices + Iter] = Index * 12 + Iter;
+			}
+
+			// right bottom
+			LinesPositions[Index * NumVertices] = Point1 - (LineUp * 0.5 + LineRight * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 1] = Point0 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 2] = Point0 - (LineUp * 0.5 + LineRight * 0.5) * Scale;
+
+			// right top
+			LinesPositions[Index * NumVertices + 3] = Point1 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 4] = Point0 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 5] = Point1 - (LineUp * 0.5 + LineRight * 0.5) * Scale;
+
+			// left bottom
+			LinesPositions[Index * NumVertices + 6] = Point1 - (LineUp * 0.5 - LineRight * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 7] = Point0 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 8] = Point0 - (LineUp * 0.5 - LineRight * 0.5) * Scale;
+
+			// left top
+			LinesPositions[Index * NumVertices + 9] = Point1 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 10] = Point0 + (LineUp * 0.5) * Scale;
+			LinesPositions[Index * NumVertices + 11] = Point1 - (LineUp * 0.5 - LineRight * 0.5) * Scale;
+
+			if (!bOpened)
+			{
+				// bottom triangle
+				// top triangle
+			}
+
+			if (bHasUVs)
+			{
+				LinesUV[Index * NumVertices] = Point1UV;
+				LinesUV[Index * NumVertices + 1] = Point0UV;
+				LinesUV[Index * NumVertices + 2] = Point0UV;
+				LinesUV[Index * NumVertices + 3] = Point1UV;
+				LinesUV[Index * NumVertices + 4] = Point0UV;
+				LinesUV[Index * NumVertices + 5] = Point1UV;
+				LinesUV[Index * NumVertices + 6] = Point1UV;
+				LinesUV[Index * NumVertices + 7] = Point0UV;
+				LinesUV[Index * NumVertices + 8] = Point0UV;
+				LinesUV[Index * NumVertices + 9] = Point1UV;
+				LinesUV[Index * NumVertices + 10] = Point0UV;
+				LinesUV[Index * NumVertices + 11] = Point1UV;
+			}
+
+			if (bUVXY)
+			{
+				PointsUVXY[Index * NumVertices] = FVector2D(Point1.X, Point1.Y);
+				PointsUVXY[Index * NumVertices + 1] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 2] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 3] = FVector2D(Point1.X, Point1.Y);
+				PointsUVXY[Index * NumVertices + 4] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 5] = FVector2D(Point1.X, Point1.Y);
+				PointsUVXY[Index * NumVertices + 6] = FVector2D(Point1.X, Point1.Y);
+				PointsUVXY[Index * NumVertices + 7] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 8] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 9] = FVector2D(Point1.X, Point1.Y);
+				PointsUVXY[Index * NumVertices + 10] = FVector2D(Point0.X, Point0.Y);
+				PointsUVXY[Index * NumVertices + 11] = FVector2D(Point1.X, Point1.Y);
+			}
+
+			if (bUVZW)
+			{
+				PointsUVZW[Index * NumVertices] = FVector2D(Point1.Z, 0);
+				PointsUVZW[Index * NumVertices + 1] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 2] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 3] = FVector2D(Point1.Z, 0);
+				PointsUVZW[Index * NumVertices + 4] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 5] = FVector2D(Point1.Z, 0);
+				PointsUVZW[Index * NumVertices + 6] = FVector2D(Point1.Z, 0);
+				PointsUVZW[Index * NumVertices + 7] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 8] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 9] = FVector2D(Point1.Z, 0);
+				PointsUVZW[Index * NumVertices + 10] = FVector2D(Point0.Z, 0);
+				PointsUVZW[Index * NumVertices + 11] = FVector2D(Point1.Z, 0);
+			}
+
+			if (bHasColors)
+			{
+				FVector4 Color0 = FVector4(1, 1, 1, 1);
+				if (Primitive.Colors.IsValidIndex(Point0Index))
+				{
+					Color0 = Primitive.Colors[Point0Index];
+				}
+
+				FVector4 Color1 = FVector4(1, 1, 1, 1);
+				if (Primitive.Colors.IsValidIndex(Point1Index))
+				{
+					Color1 = Primitive.Colors[Point1Index];
+				}
+
+				LinesColors[Index * NumVertices] = Color1;
+				LinesColors[Index * NumVertices + 1] = Color0;
+				LinesColors[Index * NumVertices + 2] = Color0;
+				LinesColors[Index * NumVertices + 3] = Color1;
+				LinesColors[Index * NumVertices + 4] = Color0;
+				LinesColors[Index * NumVertices + 5] = Color1;
+				LinesColors[Index * NumVertices + 6] = Color1;
+				LinesColors[Index * NumVertices + 7] = Color0;
+				LinesColors[Index * NumVertices + 8] = Color0;
+				LinesColors[Index * NumVertices + 9] = Color1;
+				LinesColors[Index * NumVertices + 10] = Color0;
+				LinesColors[Index * NumVertices + 11] = Color1;
+			}
+
+		};
+
+	TFunction<void(const int32)> Triangulator = nullptr;
+
+	switch (MaterialsConfig.LinesTriangulationMode)
+	{
+	case(EglTFRuntimeLinesTriangulationMode::OpenedTriangularPrism):
+	{
+		const int32 NumIndices = (Primitive.Indices.Num() / 2) * 12;
+		LinesIndices.AddZeroed(NumIndices);
+		LinesPositions.AddZeroed(NumIndices);
+		if (bHasUVs)
+		{
+			LinesUV.AddZeroed(NumIndices);
+		}
+		if (bHasColors)
+		{
+			LinesColors.AddZeroed(NumIndices);
+		}
+		bOpened = true;
+		Triangulator = ToOpenedTriangularPrism;
+	}
+	break;
+	case(EglTFRuntimeLinesTriangulationMode::OpenedTriangularPrismWithXYInUV1ZWInUV2):
+	{
+		const int32 NumIndices = (Primitive.Indices.Num() / 2) * 12;
+		LinesIndices.AddZeroed(NumIndices);
+		LinesPositions.AddZeroed(NumIndices);
+		if (bHasUVs)
+		{
+			LinesUV.AddZeroed(NumIndices);
+		}
+		if (bHasColors)
+		{
+			LinesColors.AddZeroed(NumIndices);
+		}
+		bUVXY = true;
+		bUVZW = true;
+		bOpened = true;
+		Triangulator = ToOpenedTriangularPrism;
+	}
+	break;
+	default:
+		UE_LOG(LogGLTFRuntime, Error, TEXT("Unsupported/Unimplemented Triangulator algorithm"));
+		break;
+	}
+
+	if (Triangulator)
+	{
+		const int32 NumLines = Primitive.Indices.Num() / 2;
+		ParallelFor(NumLines, Triangulator);
+		Primitive.Mode = 4;
+		Primitive.bDisableShadows = true;
+		Primitive.Indices = LinesIndices;
+		Primitive.Positions = LinesPositions;
+		Primitive.UVs = { LinesUV };
+		if (bUVXY)
+		{
+			Primitive.UVs.Add(MoveTemp(PointsUVXY));
+		}
+		if (bUVZW)
+		{
+			Primitive.UVs.Add(MoveTemp(PointsUVZW));
+		}
+		Primitive.Normals.Empty(); // TODO we should honour supplied normals...
+		Primitive.Tangents.Empty(); // TODO we should honour supplied tangents...
+		Primitive.bHighPrecisionUVs = true;
+		if (bHasColors)
+		{
+			Primitive.Colors = LinesColors;
+		}
+
+		return MaterialsConfig.LinesBaseMaterial;
+	}
+
+	return nullptr;
+}
+
+UMaterialInterface* FglTFRuntimeParser::TriangulatePointsAndLines(FglTFRuntimePrimitive& Primitive, const FglTFRuntimeMaterialsConfig& MaterialsConfig)
+{
+	if (Primitive.Mode == 0 && !MaterialsConfig.bSkipPoints) // points
+	{
+		return TriangulatePoints(Primitive, MaterialsConfig);
+	}
+	else if (Primitive.Mode >= 1 && Primitive.Mode <= 3 && !MaterialsConfig.bSkipLines)
+	{
+		return TriangulateLines(Primitive, MaterialsConfig);
+	}
+
+	return nullptr;
+}
 
 bool FglTFRuntimeParser::GetBuffer(const int32 Index, FglTFRuntimeBlob& Blob)
 {
@@ -3535,10 +4533,12 @@ void FglTFRuntimeParser::AddReferencedObjects(FReferenceCollector& Collector)
 	Collector.AddReferencedObjects(SkeletonsCache);
 	Collector.AddReferencedObjects(SkeletalMeshesCache);
 	Collector.AddReferencedObjects(TexturesCache);
+	Collector.AddReferencedObjects(MaterialsNameCache);
 	Collector.AddReferencedObjects(MetallicRoughnessMaterialsMap);
 	Collector.AddReferencedObjects(SpecularGlossinessMaterialsMap);
 	Collector.AddReferencedObjects(UnlitMaterialsMap);
 	Collector.AddReferencedObjects(TransmissionMaterialsMap);
+	Collector.AddReferencedObjects(ClearCoatMaterialsMap);
 }
 
 void FglTFRuntimeParser::ClearCache()
@@ -3548,10 +4548,12 @@ void FglTFRuntimeParser::ClearCache()
 	SkeletonsCache.Empty();
 	SkeletalMeshesCache.Empty();
 	TexturesCache.Empty();
+	MaterialsNameCache.Empty();
 	MetallicRoughnessMaterialsMap.Empty();
 	SpecularGlossinessMaterialsMap.Empty();
 	UnlitMaterialsMap.Empty();
 	TransmissionMaterialsMap.Empty();
+	ClearCoatMaterialsMap.Empty();
 }
 
 float FglTFRuntimeParser::FindBestFrames(const TArray<float>& FramesTimes, float WantedTime, int32& FirstIndex, int32& SecondIndex)
